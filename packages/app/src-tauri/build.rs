@@ -53,8 +53,9 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     // Anything else that changes what a dev rebuild produces must also re-stamp the id, or live
-    // evidence cannot tell which code ran: manifests, Tauri config, capabilities, the tests dir,
-    // and the frontend sources.
+    // evidence cannot tell which code ran: manifests, Tauri config, capabilities. Frontend and test edits
+    // are left out: Vite serves the frontend in dev, and watching them recompiled this crate for nothing.
+    // Release builds always re-stamp (below), so they still embed the current frontend.
     for path in [
         "Cargo.toml",
         "Cargo.lock",
@@ -62,8 +63,6 @@ fn main() {
         "tauri.dev.local.json",
         "capabilities",
         "resources",
-        "tests",
-        "../src",
     ] {
         // `tauri.dev.local.json` is a local, gitignored override: watched only when it is there (a missing
         // path would rerun this script, and recompile the crate, on every debug build).

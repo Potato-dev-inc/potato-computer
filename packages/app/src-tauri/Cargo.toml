@@ -9,7 +9,7 @@ default-run = "puppet_master_app"
 
 [lib]
 name = "puppet_master_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
