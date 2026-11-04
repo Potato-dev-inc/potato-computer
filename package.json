@@ -1,0 +1,25 @@
+{
+  "name": "my-computer",
+  "version": "0.2.2",
+  "private": true,
+  "description": "Share one mouse and keyboard between your computers",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run tauri --workspace=@puppet-master/app -- dev",
+    "build": "npm run build --workspace=@puppet-master/app",
+    "build:rust": "cargo build --manifest-path packages/app/src-tauri/Cargo.toml",
+    "tauri": "npm run tauri --workspace=@puppet-master/app --",
+    "typecheck": "npm run typecheck --workspace=@puppet-master/app",
+    "test": "echo \"No tests\" && exit 0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

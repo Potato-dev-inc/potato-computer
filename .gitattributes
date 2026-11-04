@@ -1,0 +1,87 @@
+packages/app/src-tauri/resources/mcp-stdio.bundle.cjs linguist-generated=true
+packages/app/src-tauri/resources/pwa-dist/** linguist-generated=true
+packages/app/dist/** linguist-generated=true
+packages/app/dev-dist/** linguist-generated=true
+packages/**/dist/** linguist-generated=true
+
+# Definition fixtures are include_str!-ed and patched with multi-line string replaces in tests;
+# keep them LF on every checkout (core.autocrlf=true would make them CRLF). Scoped to these dirs only.
+packages/app/src-tauri/src/tui/declarative/fixtures/definitions/*.toml text eol=lf
+packages/app/src-tauri/tests/agent-definitions/*.toml text eol=lf
+# The acme transcript fixture has its byte offsets asserted: keep it LF.
+packages/app/src-tauri/src/tui/declarative/fixtures/acme/*.jsonl text eol=lf
+# The wizard tests patch these drafts with multi-line string replaces too.
+packages/app/src-tauri/src/tui/declarative/wizard/tests/drafts/*.toml text eol=lf
+
+# The agent skill pack is include_str!-ed by the installer and compared byte for byte with the plugin copies;
+# keep it LF on every checkout.
+integrations/** text eol=lf
+.claude-plugin/*.json text eol=lf
+.agents/plugins/*.json text eol=lf
+
+# Wizard test fixtures are split on "\n=====\n" or patched with multi-line replaces: keep them LF on every checkout.
+packages/app/src-tauri/src/tui/declarative/wizard/tests/fixtures/* text eol=lf
+
+# Point message golden fixtures are compared byte for byte (SPEC n32 PF-4): keep them LF.
+packages/app/src-tauri/src/point/tests/fixtures/*.txt text eol=lf
+
+# Golden files compared byte for byte by the agent pack tests.
+packages/app/src-tauri/src/agent_pack/golden/* text eol=lf
+
+# Codex rollout fixtures are read line by line and compared with their offsets: keep them LF.
+packages/app/src-tauri/src/tui/codex/fixtures/*.jsonl text eol=lf
+# A finished Codex rollout compressed with zstd (made from rollout_basic.jsonl): binary, never converted.
+packages/app/src-tauri/src/tui/codex/fixtures/*.zst binary
+# Claude session fixtures are read line by line and compared with their offsets: keep them LF.
+packages/app/src-tauri/src/tui/claude/fixtures/*.jsonl text eol=lf
+
+# Raw terminal bytes (cursor moves, CR/LF as the pane sent them), read by tests through the terminal emulator: never convert.
+packages/app/src-tauri/src/tui/**/fixtures/*.ansi -text
+
+# Codex trust-dialog captures: read through include_str! and split on newlines, keep them LF.
+packages/app/src-tauri/src/tui/codex/fixtures/trust_folder_*.txt text eol=lf
+packages/app/src-tauri/src/tui/*/fixtures/*.txt text eol=lf
+
+# OpenCode screen captures (rows read through the terminal emulator): keep them LF.
+packages/app/src-tauri/src/tui/opencode/fixtures/screen_*.txt text eol=lf
+packages/app/src-tauri/src/tui/claude/fixtures/ask_user_question_*.txt text eol=lf
+packages/app/src-tauri/src/tui/opencode/fixtures/*.json text eol=lf
+# Retyped from a screenshot, include_str!-ed by the Codex update-menu tests; keep LF.
+packages/app/src-tauri/src/tui/codex/fixtures/update_prompt_0_164_live.txt text eol=lf
+# Synthetic chat-history fixtures (SPEC n32 BC-4): read line by line and compared with offsets: keep them LF.
+packages/app/src-tauri/src/tui/*/fixtures/history/** text eol=lf
+# SQLite fixture databases (BC-16) are binary: never converted or diffed as text.
+packages/app/src-tauri/src/tui/*/fixtures/history/**/*.db binary
+# Keep-going brief golden fixtures are compared byte for byte: keep them LF on every checkout.
+packages/app/src-tauri/src/handoff/keep_going/fixtures/*.txt text eol=lf
+# Branch-from brief golden fixtures are compared byte for byte (SPEC n33 BF-5): keep them LF.
+packages/app/src-tauri/src/branch_from/fixtures/*.txt text eol=lf
+# Text Your Agents golden messages (TG-9) are compared byte for byte: keep them LF on every checkout.
+packages/app/src-tauri/src/channels/golden/*.txt text eol=lf
+
+# Agent Store catalog text is include_str!-ed and the generated list is compared byte for byte.
+packages/app/src-tauri/catalog/agents/**/*.toml text eol=lf
+packages/app/src-tauri/catalog/agents/**/*.txt text eol=lf
+packages/app/src-tauri/catalog/agents/**/*.jsonl text eol=lf
+packages/app/src-tauri/src/agent_store/embedded.rs text eol=lf
+scripts/fixtures/store-catalog/** text eol=lf
+
+# Assign-an-issue fixtures are parsed as JSON; keep them LF on every checkout.
+packages/app/src-tauri/src/issue_intake/fixtures/gh/*.json text eol=lf
+# Assign-an-issue text fixtures (issue bodies, task and issue-file goldens) are compared byte for byte: keep them LF.
+packages/app/src-tauri/src/issue_intake/fixtures/text/*.txt text eol=lf
+# Package check top lists (SPEC-n33 PC-2): read by include_str! and split on newlines; keep LF.
+packages/app/src-tauri/src/prompt_risk/packages/popular/*.txt text eol=lf
+
+# Linux Inside wsl.exe list and probe samples (spec n33 WSL-6): the UTF-16LE list sample is binary and never
+# converted; the text samples are read line by line and compared by value, keep them LF.
+packages/app/src-tauri/src/wsl/fixtures/*.utf16 -text
+packages/app/src-tauri/src/wsl/fixtures/*.txt text eol=lf
+
+# What Broke It test-runner output fixtures (failing-name parsing): read line by line, keep them LF.
+packages/app/src-tauri/src/checkpoints/bisect/fixtures/fail_*.txt text eol=lf
+
+# Red to Green GitHub fixtures are parsed as JSON; keep them LF on every checkout.
+packages/app/src-tauri/src/ci_fix/fixtures/gh/*.json text eol=lf
+# Red to Green log fixtures and their golden log files are compared byte for byte: keep them LF.
+packages/app/src-tauri/src/ci_fix/fixtures/logs/* text eol=lf

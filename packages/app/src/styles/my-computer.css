@@ -1,0 +1,9 @@
+/* The My Computer window: one column, no sidebar. */
+.cockpit.ck-solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cockpit.ck-solo .ck-main {
+  min-height: 0;
+  overflow: hidden;
+}
