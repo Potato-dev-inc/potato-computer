@@ -11,6 +11,7 @@
 //! Coordinates are points, as in the rest of this module.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use super::ffi::{self, CFTypeRef, CGEventRef, CGEventSourceRef, CGPoint};
 use super::{clipboard, cursor, display, hook, pointer_watch};
 use crate::desk::host::DisplayInfo;
 use crate::desk::link::clickstate::{next_click_count, LastClick};
+use crate::desk::link::park::{park_point, PARK_SPAN};
 use crate::desk::link::remote::{CaptureSink, ClipItem, Inject, PointerSink, RemoteHost};
 
 /// The screen list is reused for this long on the move path; it is read on every injected move otherwise.
@@ -50,6 +52,8 @@ pub struct MacosRemote {
     held: Mutex<Held>,
     /// The screen list and when it was read (see `SCREEN_CACHE`).
     screen_cache: Mutex<Option<(Vec<DisplayInfo>, Instant)>>,
+    /// The drag pasteboard's change count when no button was held (see `dragged_files`).
+    drag_baseline: Mutex<usize>,
 }
 
 impl MacosRemote {
@@ -60,6 +64,7 @@ impl MacosRemote {
             watch: Mutex::new(None),
             held: Mutex::new(Held::default()),
             screen_cache: Mutex::new(None),
+            drag_baseline: Mutex::new(usize::MAX),
         }
     }
 
@@ -323,21 +328,44 @@ impl RemoteHost for MacosRemote {
 
     // The exit point is not used: the Mac does not park the pointer (see os/macos/capture.rs), so a swallowed move
     // never reaches the screen.
-    fn start_capture(&self, sink: CaptureSink, _exit: (i32, i32)) -> Result<(), String> {
+    fn start_capture(&self, sink: CaptureSink, exit: (i32, i32)) -> Result<(), String> {
         let mut slot = self.capture.lock().unwrap_or_else(|p| p.into_inner());
         if slot.is_some() {
             return Ok(());
         }
         *slot = Some(capture::start(sink)?);
+        // Hold the cursor still, inside the screen it left from, and hide it (as DevHop did): the tap swallows the
+        // moves, but without this macOS still slid the cursor around on this Mac.
+        let screens = self.screens().unwrap_or_default();
+        let park = match screens.iter().find(|d| exit.0 >= d.x && exit.0 < d.x + d.width as i32 && exit.1 >= d.y && exit.1 < d.y + d.height as i32) {
+            Some(d) => park_point(exit, (d.x, d.y, d.width as i32, d.height as i32), PARK_SPAN),
+            None => clamp_to_screens(&screens, exit),
+        };
+        cursor::park(park);
         Ok(())
     }
 
     fn stop_capture(&self) {
+        // The cursor comes back first, whatever state the tap is in.
+        cursor::unpark();
         let hook = self.capture.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(hook) = hook {
             // Keys that were down when the pointer left and were let go meanwhile: tell this computer.
-            for code in hook.stop() {
+            let (codes, buttons) = hook.stop();
+            for code in codes {
                 let _ = key_event(code, false, 0);
+            }
+            // A button held when the pointer left (a drag of files) and let go over there. Esc first: if the drag
+            // in the app it started in is somehow still alive, the release must not drop the files here.
+            if !buttons.is_empty() {
+                let _ = key_event(0x35, true, 0);
+                let _ = key_event(0x35, false, 0);
+            }
+            if let Ok(at) = cursor::position() {
+                for button in buttons {
+                    let (_, up, _, number) = button_types(button);
+                    let _ = post_mouse(up, at, number, Some(1), None, 0);
+                }
             }
         }
     }
@@ -357,6 +385,32 @@ impl RemoteHost for MacosRemote {
         if let Some(watch) = watch {
             watch.stop();
         }
+    }
+
+    fn dragged_files(&self) -> Option<Vec<PathBuf>> {
+        // Only a drag that started since the button went down: the drag pasteboard keeps the last drag's files.
+        let baseline = *self.drag_baseline.lock().unwrap_or_else(|p| p.into_inner());
+        if clipboard::drag_change_count() == baseline {
+            return None;
+        }
+        let files = clipboard::drag_files();
+        (!files.is_empty()).then_some(files)
+    }
+
+    fn drag_reset(&self) {
+        *self.drag_baseline.lock().unwrap_or_else(|p| p.into_inner()) = clipboard::drag_change_count();
+    }
+
+    fn cancel_local_drag(&self) {
+        // Esc ends the drag in Finder (or wherever it started) without a drop. The tap lets this app's own events
+        // through.
+        const ESCAPE: u16 = 0x35;
+        let _ = key_event(ESCAPE, true, 0);
+        let _ = key_event(ESCAPE, false, 0);
+    }
+
+    fn reveal(&self, path: &Path) {
+        let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
     }
 
     fn clipboard_read(&self) -> Result<Vec<ClipItem>, String> {

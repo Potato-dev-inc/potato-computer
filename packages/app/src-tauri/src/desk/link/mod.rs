@@ -24,7 +24,8 @@
 //!
 //! Layout: `hub` (decisions), `io` (one link's tasks), `clip_link` (clipboard streams), `clipboard` (chunk rules),
 //! `geometry` (edges), `arrange` (where each computer sits in one shared space, and where the pointer crosses),
-//! `remote` (the OS trait), `wire` (framing), `commands` (the page's commands).
+//! `remote` (the OS trait), `wire` (framing), `commands` (the page's commands), `files` (files dragged across;
+//! the hub side is `hub/drag.rs`).
 //!
 //! **The layout**: each paired computer is placed at a spot relative to this one (`arrange::Spot`). The two computers
 //! send each other their screens and the placement (`StreamMsg::Layout`, newest revision wins, ties go to the lower
@@ -37,6 +38,7 @@ pub mod clip_link;
 pub mod clipboard;
 pub mod commands;
 mod crossing;
+pub mod files;
 pub mod geometry;
 pub mod hub;
 pub mod io;
@@ -60,7 +62,6 @@ use desk_core::Side;
 use desk_proto::OsKind;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::p2p::alpn;
@@ -288,7 +289,11 @@ pub(super) struct Inner {
     next_link: AtomicU64,
     next_token: AtomicU64,
     labs: AtomicBool,
-    hub: Mutex<Option<(mpsc::UnboundedSender<Msg>, JoinHandle<()>)>>,
+    hub: Mutex<Option<(mpsc::UnboundedSender<Msg>, std::thread::JoinHandle<()>)>>,
+    /// The drag of files this computer was told about: from which computer, and its token (`files.rs`).
+    drop_expect: Mutex<Option<(NodeId, u64)>>,
+    /// The app's runtime, where the network and the link tasks run (the hub has a thread of its own).
+    rt: Mutex<Option<tokio::runtime::Handle>>,
     store: Arc<dyn LinkStore>,
     peers: Mutex<BTreeMap<String, PeerRec>>,
     /// This computer's screens in local space and where that space's origin is on the desktop. Kept by the hub.
@@ -326,6 +331,41 @@ impl Inner {
 
     pub(super) fn node_hex(&self) -> String {
         self.p2p.node_id().map(|n| n.to_hex()).unwrap_or_default()
+    }
+
+    /// Runs `f` on the app's runtime, also when called from the hub's own thread: the network lives there.
+    pub(super) fn spawn<F>(&self, f: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        match lock(&self.rt).clone() {
+            Some(rt) => {
+                rt.spawn(f);
+            }
+            None => {
+                tokio::spawn(f);
+            }
+        }
+    }
+
+    /// The computer using this one announced a drag of files: its transfer stream will be taken.
+    pub(super) fn expect_drop(&self, peer: NodeId, token: u64) {
+        *lock(&self.drop_expect) = Some((peer, token));
+    }
+
+    pub(super) fn clear_drop(&self) {
+        *lock(&self.drop_expect) = None;
+    }
+
+    /// Whether a transfer stream from `peer` for `token` is the one announced. Taken once.
+    pub(super) fn drop_expected(&self, peer: &NodeId, token: u64) -> bool {
+        let mut e = lock(&self.drop_expect);
+        if *e == Some((*peer, token)) {
+            *e = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn hub_tx(&self) -> Option<mpsc::UnboundedSender<Msg>> {
@@ -694,7 +734,7 @@ impl Inner {
             return;
         }
         let me = self.clone();
-        tokio::spawn(async move {
+        self.spawn(async move {
             for (id, on) in [(capability::DESK_INPUT, want.0), (capability::DESK_CLIPBOARD, want.1)] {
                 if on {
                     let _ = me.p2p.want(id).await;
@@ -751,6 +791,8 @@ impl DeskLink {
             next_token: AtomicU64::new(0),
             labs: AtomicBool::new(false),
             hub: Mutex::new(None),
+            rt: Mutex::new(None),
+            drop_expect: Mutex::new(None),
             store,
             peers: Mutex::new(peers),
             shapes: Mutex::new((Vec::new(), (0, 0))),
@@ -800,8 +842,22 @@ impl DeskLink {
             return;
         }
         let (tx, rx) = mpsc::unbounded_channel();
+        *lock(&self.inner.rt) = Some(tokio::runtime::Handle::current());
         let hub = Hub::new(self.inner.clone(), tx.clone());
-        *slot = Some((tx, tokio::spawn(hub.run(rx))));
+        // The hub gets a thread and a runtime of its own, at a high priority: every key and every pointer move goes
+        // through it, and on the app's shared runtime it waited behind whatever else the app was doing (the page,
+        // the clipboard, other links), which showed as stutter. Its network tasks still run on the app's runtime.
+        let thread = std::thread::Builder::new().name("desk-hub".into()).spawn(move || {
+            crate::desk::os::boost_thread();
+            match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+                Ok(rt) => rt.block_on(hub.run(rx)),
+                Err(e) => tracing::warn!(error = %e, "desk: could not start the mouse sharing thread"),
+            }
+        });
+        match thread {
+            Ok(t) => *slot = Some((tx, t)),
+            Err(e) => tracing::warn!(error = %e, "desk: could not start the mouse sharing thread"),
+        }
     }
 
     /// The hub ends, every link closes, the pointer comes home.

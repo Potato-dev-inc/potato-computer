@@ -89,6 +89,10 @@ struct Ctx {
     down_at_start: BTreeSet<u16>,
     /// Of those, the ones whose release was swallowed.
     swallowed_ups: Mutex<BTreeSet<u16>>,
+    /// Mouse buttons (0 left, 1 right, 2 middle) down when the pointer left: a drag of files crosses with one held.
+    buttons_at_start: [bool; 3],
+    /// Of those, the ones whose release was swallowed.
+    swallowed_button_ups: Mutex<BTreeSet<u8>>,
 }
 
 static ACTIVE: ArcSwapOption<Ctx> = ArcSwapOption::const_empty();
@@ -130,11 +134,23 @@ pub fn start(sink: CaptureSink, park: (i32, i32), span: i32) -> Result<CaptureHo
 
 fn start_hooks(sink: CaptureSink, park: (i32, i32), span: i32) -> Result<CaptureHook, String> {
     let down_at_start: BTreeSet<u16> = (0x08u16..=0xFE).filter(|vk| key_down(*vk)).collect();
-    let ctx = Arc::new(Ctx { sink, park, span, parked_at: Instant::now(), down_at_start, swallowed_ups: Mutex::new(BTreeSet::new()) });
+    let buttons_at_start = [key_down(0x01), key_down(0x02), key_down(0x04)];
+    let ctx = Arc::new(Ctx {
+        sink,
+        park,
+        span,
+        parked_at: Instant::now(),
+        down_at_start,
+        swallowed_ups: Mutex::new(BTreeSet::new()),
+        buttons_at_start,
+        swallowed_button_ups: Mutex::new(BTreeSet::new()),
+    });
     ACTIVE.store(Some(ctx.clone()));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<u32, String>>();
     let spawned = thread::Builder::new().name("desk-capture".into()).spawn(move || {
         let _dpi = DpiScope::new();
+        // Windows calls a low-level hook on this thread for every key and move on the whole computer.
+        crate::desk::os::boost_thread();
         // SAFETY: the hook procedures are plain functions; this thread runs the message loop they need.
         unsafe {
             let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0);
@@ -194,9 +210,9 @@ fn start_hooks(sink: CaptureSink, park: (i32, i32), span: i32) -> Result<Capture
 }
 
 impl CaptureHook {
-    /// Ends the hooks and waits for the thread. Returns the virtual keys that were down when the pointer left and
-    /// were let go meanwhile: their release never reached this computer and must be sent now.
-    pub fn stop(self) -> Vec<u16> {
+    /// Ends the hooks and waits for the thread. Returns the virtual keys, then the mouse buttons, that were down when
+    /// the pointer left and were let go meanwhile: their release never reached this computer and must be sent now.
+    pub fn stop(self) -> (Vec<u16>, Vec<u8>) {
         set_remote_mode(false);
         ACTIVE.store(None);
         // SAFETY: plain call to the capture thread's id.
@@ -204,7 +220,9 @@ impl CaptureHook {
             let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
         }
         let _ = self.join.join();
-        self.ctx.swallowed_ups.lock().map(|s| s.iter().copied().collect()).unwrap_or_default()
+        let keys = self.ctx.swallowed_ups.lock().map(|s| s.iter().copied().collect()).unwrap_or_default();
+        let buttons = self.ctx.swallowed_button_ups.lock().map(|s| s.iter().copied().collect()).unwrap_or_default();
+        (keys, buttons)
     }
 }
 
@@ -256,6 +274,8 @@ pub fn start_watch(sink: PointerSink) -> Result<WatchHook, String> {
     let (ready_tx, ready_rx) = mpsc::channel::<Result<u32, String>>();
     let spawned = thread::Builder::new().name("desk-watch".into()).spawn(move || {
         let _dpi = DpiScope::new();
+        // Windows calls a low-level hook on this thread for every key and move on the whole computer.
+        crate::desk::os::boost_thread();
         // SAFETY: the hook procedure is a plain function; this thread runs the message loop it needs.
         unsafe {
             match SetWindowsHookExW(WH_MOUSE_LL, Some(watch_proc), None, 0) {
@@ -376,6 +396,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         WM_MOUSEHWHEEL => Some(Capture::Wheel { dx: i32::from((info.mouseData >> 16) as i16), dy: 0 }),
         _ => None,
     };
+    if let Some(Capture::Button { button, down: false }) = event {
+        if ctx.buttons_at_start.get(usize::from(button)).copied().unwrap_or(false) {
+            if let Ok(mut s) = ctx.swallowed_button_ups.try_lock() {
+                s.insert(button);
+            }
+        }
+    }
     if let Some(e) = event {
         let motion = matches!(e, Capture::Motion { .. });
         (ctx.sink)(e);
@@ -388,7 +415,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     // Back to the park point after every mouse event, so the next position is again the distance moved since this
     // one. Swallowing the event does not keep the position from drifting: without this the distances grow until
     // they hit the edge of the screen and the other computer's pointer is thrown into a corner.
-    let _ = super::cursor::warp(ctx.park.0, ctx.park.1);
+    super::cursor::warp_quiet(ctx.park.0, ctx.park.1);
     // Everything the person does with the mouse stays off this computer while the pointer is away.
     LRESULT(1)
 }

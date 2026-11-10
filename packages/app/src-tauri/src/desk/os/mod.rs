@@ -28,3 +28,27 @@ pub fn default_host() -> Arc<dyn DeskHost> {
         Arc::new(stub::StubHost)
     }
 }
+
+/// Raises the calling thread's priority: for the threads every key and pointer move passes through (the hub, the
+/// capture hook). A busy computer then delays the pointer less. Never fails; a refusal leaves the priority as it was.
+pub fn boost_thread() {
+    #[cfg(windows)]
+    {
+        use ::windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+        // SAFETY: plain call on the current thread's pseudo handle.
+        unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn pthread_set_qos_class_self_np(qos: u32, relative_priority: i32) -> i32;
+        }
+        const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+        // SAFETY: plain call on the current thread.
+        unsafe {
+            let _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        }
+    }
+}

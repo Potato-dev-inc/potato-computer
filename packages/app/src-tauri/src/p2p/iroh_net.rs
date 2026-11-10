@@ -22,7 +22,7 @@ use super::endpoint::{
 use super::identity::DeviceIdentity;
 
 /// How often a link looks at which path iroh has selected.
-const PATH_POLL: Duration = Duration::from_millis(500);
+const PATH_POLL: Duration = Duration::from_millis(200);
 
 fn net<E: std::fmt::Display>(e: E) -> P2pError {
     P2pError::Net(e.to_string())

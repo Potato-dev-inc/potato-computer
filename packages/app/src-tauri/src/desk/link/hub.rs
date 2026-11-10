@@ -55,6 +55,42 @@ fn short(peer: &NodeId) -> String {
 }
 
 mod actions;
+mod drag;
+
+/// The most motion messages added into one (keeps a flood from starving everything else).
+const MERGE_MAX: usize = 64;
+
+/// Adds the motion that follows `first` (taken from `more` while it is the same kind, from the same source) into it.
+/// Returns the merged message and the first one that did not fit, if any. Anything that is not motion passes as is.
+fn merge_motion(first: Msg, mut more: impl FnMut() -> Option<Msg>) -> (Msg, Option<Msg>) {
+    match first {
+        Msg::Motion { peer, link_id, mut dx, mut dy } => {
+            for _ in 0..MERGE_MAX {
+                match more() {
+                    Some(Msg::Motion { peer: p, link_id: l, dx: x, dy: y }) if p == peer && l == link_id => {
+                        dx = dx.saturating_add(x);
+                        dy = dy.saturating_add(y);
+                    }
+                    other => return (Msg::Motion { peer, link_id, dx, dy }, other),
+                }
+            }
+            (Msg::Motion { peer, link_id, dx, dy }, None)
+        }
+        Msg::Capture(Capture::Motion { mut dx, mut dy }) => {
+            for _ in 0..MERGE_MAX {
+                match more() {
+                    Some(Msg::Capture(Capture::Motion { dx: x, dy: y })) => {
+                        dx = dx.saturating_add(x);
+                        dy = dy.saturating_add(y);
+                    }
+                    other => return (Msg::Capture(Capture::Motion { dx, dy }), other),
+                }
+            }
+            (Msg::Capture(Capture::Motion { dx, dy }), None)
+        }
+        other => (other, None),
+    }
+}
 
 pub struct InstallReq {
     pub peer: NodeId,
@@ -87,6 +123,10 @@ pub enum Msg {
     LocalMotion { x: i32, y: i32, dx: i32, dy: i32 },
     /// The placement of a computer changed here: tell the linked computers.
     LayoutChanged,
+    /// Files dragged here arrived (staged) or failed (`files.rs`).
+    DropReceived { peer: NodeId, link_id: u64, token: u64, result: Result<Vec<std::path::PathBuf>, String> },
+    /// The drag of arrived files that this computer started has ended.
+    DropFinished { token: u64, accepted: bool },
     Shutdown,
 }
 
@@ -108,6 +148,8 @@ struct Remote {
     /// Where the pointer comes back to when nothing says otherwise: inside the edge it left through.
     home: (i32, i32),
     side: Side,
+    /// Files dragged across with the pointer.
+    drag: Option<drag::DragOut>,
 }
 
 /// Why the pointer came home on this computer. The log says it in one line.
@@ -136,6 +178,7 @@ enum Block {
     Waiting(NodeId),
     ButtonHeld(NodeId),
     InputOff(NodeId),
+    DragWait,
 }
 
 impl Block {
@@ -149,6 +192,7 @@ impl Block {
             Block::Waiting(p) => ("waiting", format!("waiting after a refusal peer={}", short(&p))),
             Block::ButtonHeld(p) => ("button", format!("button held peer={}", short(&p))),
             Block::InputOff(p) => ("input", format!("input off peer={}", short(&p))),
+            Block::DragWait => ("dragwait", "waiting to see what is dragged".to_string()),
         }
     }
 }
@@ -237,6 +281,13 @@ pub struct Hub {
     /// When the page was last handed a view, and whether a change is waiting for the next tick.
     published_at: Option<u64>,
     publish_waiting: bool,
+    /// A button was held at the last local look (files may be dragged; see `hub/drag.rs`).
+    drag_held: bool,
+    /// The strip shown along an edge while a button is held near it, and since when.
+    strip: Option<(i32, i32, i32, i32)>,
+    strip_since: u64,
+    /// Files being dragged to this computer.
+    drop_in: Option<drag::DropIn>,
 }
 
 impl Hub {
@@ -264,6 +315,10 @@ impl Hub {
             error: None,
             published_at: None,
             publish_waiting: false,
+            drag_held: true,
+            strip: None,
+            strip_since: 0,
+            drop_in: None,
         }
     }
 
@@ -273,17 +328,36 @@ impl Hub {
         let mut upkeep = interval(UPKEEP);
         upkeep.set_missed_tick_behavior(MissedTickBehavior::Delay);
         self.refresh_displays();
+        // A message taken off the queue while merging motion, to be handled next.
+        let mut next: Option<Msg> = None;
         loop {
+            if let Some(m) = next.take() {
+                if matches!(m, Msg::Shutdown) {
+                    break;
+                }
+                next = self.on_msg_merged(m, &mut rx);
+                continue;
+            }
             tokio::select! {
+                biased;
                 msg = rx.recv() => match msg {
                     Some(Msg::Shutdown) | None => break,
-                    Some(m) => self.on_msg(m),
+                    Some(m) => next = self.on_msg_merged(m, &mut rx),
                 },
                 _ = poll.tick(), if !self.live.is_empty() => self.poll_edge(),
                 _ = upkeep.tick() => self.upkeep(),
             }
         }
         self.teardown();
+    }
+
+    /// Handles `m`. Motion already waiting behind it in the queue (same source, same link) is added into it first, so
+    /// a hub that fell behind for a moment catches up with one move instead of replaying every step late. Returns the
+    /// first message that could not be merged, to be handled next.
+    fn on_msg_merged(&mut self, m: Msg, rx: &mut mpsc::UnboundedReceiver<Msg>) -> Option<Msg> {
+        let (merged, rest) = merge_motion(m, || rx.try_recv().ok());
+        self.on_msg(merged);
+        rest
     }
 
     fn ms(&self) -> u64 {
@@ -408,6 +482,14 @@ impl Hub {
             Msg::Kick => self.upkeep(),
             Msg::LayoutChanged => self.send_layouts(),
             Msg::LocalMotion { x, y, dx, dy } => self.on_local_motion((x, y), (dx, dy)),
+            Msg::DropReceived { peer, link_id, token, result } => {
+                if self.sessions.is_current(&peer, link_id) {
+                    self.on_drop_received(peer, token, result);
+                } else if let Ok(items) = result {
+                    drag::discard(items);
+                }
+            }
+            Msg::DropFinished { token, accepted } => self.on_drop_finished(token, accepted),
             Msg::Shutdown => {}
         }
         self.sync_watch();
@@ -529,6 +611,10 @@ impl Hub {
         } else {
             None
         };
+        if blocked.is_none() {
+            let held = self.inner.host.buttons_held();
+            self.track_drag(held, local);
+        }
         if let Some(why) = blocked {
             // Only worth a line when the pointer rests on an edge that faces a connected computer.
             let on_edge = self.live.keys().any(|p| self.inner.depart_to(p, &self.shapes, local, &ALL_SIDES).is_some());
@@ -565,10 +651,16 @@ impl Hub {
         if !self.inner.input_allowed(&peer) {
             return self.say_not_crossing(Block::InputOff(peer));
         }
+        let mut files = None;
         if self.inner.host.buttons_held() {
-            return self.say_not_crossing(Block::ButtonHeld(peer));
+            // A button held through the edge crosses only with files dragged in it.
+            match self.drag_for_crossing() {
+                Ok(Some(f)) => files = Some(f),
+                Ok(None) => return self.say_not_crossing(Block::DragWait),
+                Err(()) => return self.say_not_crossing(Block::ButtonHeld(peer)),
+            }
         }
-        if self.cross_to(peer, &dep, pos, by) {
+        if self.cross_to(peer, &dep, pos, by, files) {
             self.publish();
         }
     }
@@ -581,9 +673,9 @@ impl Hub {
         }
     }
 
-    fn cross_to(&mut self, peer: NodeId, dep: &arrange::Departure, pos: (i32, i32), by: &'static str) -> bool {
+    fn cross_to(&mut self, peer: NodeId, dep: &arrange::Departure, pos: (i32, i32), by: &'static str, files: Option<Vec<std::path::PathBuf>>) -> bool {
         let side = dep.side;
-        if !self.inner.input_allowed(&peer) || self.inner.host.buttons_held() {
+        if !self.inner.input_allowed(&peer) || (files.is_none() && self.inner.host.buttons_held()) {
             return false;
         }
         let Some(live) = self.live.get(&peer) else { return false };
@@ -604,7 +696,8 @@ impl Hub {
         let (nx, ny) = (frac(dep.to.0, theirs.0), frac(dep.to.1, theirs.1));
         let _ = live.ctl.send(StreamMsg::Enter { monitor_id: arrange::enter_tag(entry, dep.to), nx_milli: nx, ny_milli: ny });
         self.control.handle(ControlEvent::CrossTo { peer: desk_core::DeviceId(peer.to_hex()), button_held: false });
-        self.remote = Some(Remote { peer, home, side });
+        let drag = files.and_then(|f| self.start_drag_out(peer, f));
+        self.remote = Some(Remote { peer, home, side, drag });
         self.error = None;
         tracing::info!(peer = short(&peer).as_str(), side = side_name(side), by, "desk: the pointer left for another computer");
         clip_link::spawn_send(&self.inner, peer);
@@ -633,6 +726,11 @@ impl Hub {
                 let _ = live.ctl.send(StreamMsg::Key { hid, down });
             }
             Capture::Button { button, down } => {
+                if button == 0 && !down {
+                    if let Some(d) = self.remote.as_mut().and_then(|r| r.drag.as_mut()) {
+                        d.released = true;
+                    }
+                }
                 self.control.handle(if down { ControlEvent::ButtonDown(button) } else { ControlEvent::ButtonUp(button) });
                 let _ = live.ctl.send(StreamMsg::Button { button, down });
             }
@@ -652,8 +750,10 @@ impl Hub {
 
     /// Back to this computer. `arrival` is where the pointer appears; without it, where it left.
     fn go_home(&mut self, arrival: Option<(i32, i32)>, why: Home) {
-        let Some(r) = self.remote.take() else { return };
+        let Some(mut r) = self.remote.take() else { return };
         let peer = r.peer;
+        let drag = r.drag.take();
+        self.end_drag_out(&peer, drag);
         let why = why.text();
         tracing::info!(peer = short(&peer).as_str(), "desk: pointer home reason={why}");
         // The machine keeps the phase in step; what must happen does not depend on what it thinks.
@@ -707,6 +807,9 @@ impl Hub {
         match msg {
             StreamMsg::Enter { monitor_id, nx_milli, ny_milli } => self.on_enter(peer, &monitor_id, nx_milli, ny_milli),
             StreamMsg::Key { hid, down } => {
+                if hid == HID_ESC && down && self.controlled.as_ref().is_some_and(|c| c.peer == peer) {
+                    self.drop_in_button_up(true);
+                }
                 let from = self.live.get(&peer).map_or(HostOs::Windows, |l| host_os(l.os));
                 let hid = translate_hid(self.inner.peer_prefs(&peer).modifier_map(), from, host_os(io::os_here()), hid);
                 self.inject_held(peer, Inject::Key { hid, down }, |c| {
@@ -719,13 +822,18 @@ impl Hub {
                     }
                 });
             }
-            StreamMsg::Button { button, down } => self.inject_held(peer, Inject::Button { button, down }, |c| {
+            StreamMsg::Button { button, down } => {
+                if button == 0 && !down && self.controlled.as_ref().is_some_and(|c| c.peer == peer) {
+                    self.drop_in_button_up(false);
+                }
+                self.inject_held(peer, Inject::Button { button, down }, |c| {
                 if down {
                     c.buttons.insert(button);
                 } else {
                     c.buttons.remove(&button);
                 }
-            }),
+            })
+            }
             StreamMsg::Wheel { dx, dy } => {
                 let (dx, dy) = desk_core::normalize_wheel(self.inner.peer_prefs(&peer).scroll_in(), dx, dy);
                 self.inject_held(peer, Inject::Wheel { dx, dy }, |_| {})
@@ -740,6 +848,8 @@ impl Hub {
                     self.go_home(None, Home::Leave);
                 }
             }
+            StreamMsg::DragStart { token, files } => self.on_drag_start(peer, token, files.len()),
+            StreamMsg::DragCancel { token } => self.on_drag_cancel(peer, token),
             StreamMsg::Layout { bytes } => {
                 if let Some(m) = arrange::decode_msg(&bytes) {
                     if self.inner.apply_layout(&peer, m) {
@@ -904,6 +1014,9 @@ impl Hub {
 
     /// Key-up and button-up for everything pressed on behalf of the peer.
     fn release_controlled(&mut self) {
+        if self.controlled.is_some() {
+            self.drop_in_control_ended();
+        }
         let Some(c) = self.controlled.take() else { return };
         let (keys, buttons) = (c.keys.len(), c.buttons.len());
         tracing::info!("desk: held at end keys={keys} buttons={buttons}");
@@ -954,7 +1067,7 @@ impl Hub {
     fn spawn_dial(&self, peer: NodeId) {
         let inner = self.inner.clone();
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.inner.spawn(async move {
             let addr = inner.p2p.addrs().peer(peer);
             match inner.p2p.dial(&addr, capability::DESK_INPUT).await {
                 Ok(link) => io::run_link(inner, peer, link, true).await,
@@ -1017,5 +1130,56 @@ impl Hub {
             l.link.close(CLOSE_STOPPED, "bye");
         }
         self.inner.publish(HashMap::new(), None, None, self.paused, None);
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn motion(peer: u8, link_id: u64, dx: i32, dy: i32) -> Msg {
+        Msg::Motion { peer: NodeId([peer; 32]), link_id, dx, dy }
+    }
+
+    fn take(queue: &mut std::collections::VecDeque<Msg>) -> impl FnMut() -> Option<Msg> + '_ {
+        move || queue.pop_front()
+    }
+
+    #[test]
+    fn waiting_motion_from_the_same_link_is_added_up_and_the_next_message_is_kept() {
+        let mut q: std::collections::VecDeque<Msg> = vec![motion(1, 7, 2, -1), motion(1, 7, 3, 4), Msg::Kick, motion(1, 7, 9, 9)].into();
+        let (m, rest) = merge_motion(motion(1, 7, 1, 1), take(&mut q));
+        assert!(matches!(m, Msg::Motion { dx: 6, dy: 4, link_id: 7, .. }));
+        assert!(matches!(rest, Some(Msg::Kick)), "order is kept: the key or click after the moves comes next");
+        assert_eq!(q.len(), 1, "nothing after it is touched");
+    }
+
+    #[test]
+    fn motion_from_another_link_or_computer_is_not_merged() {
+        let mut q: std::collections::VecDeque<Msg> = vec![motion(1, 8, 5, 5)].into();
+        let (m, rest) = merge_motion(motion(1, 7, 1, 1), take(&mut q));
+        assert!(matches!(m, Msg::Motion { dx: 1, dy: 1, .. }));
+        assert!(matches!(rest, Some(Msg::Motion { link_id: 8, .. })));
+        let mut q: std::collections::VecDeque<Msg> = vec![motion(2, 7, 5, 5)].into();
+        let (_, rest) = merge_motion(motion(1, 7, 1, 1), take(&mut q));
+        assert!(matches!(rest, Some(Msg::Motion { dx: 5, .. })));
+    }
+
+    #[test]
+    fn captured_motion_is_added_up_but_never_a_key_in_between() {
+        let mut q: std::collections::VecDeque<Msg> =
+            vec![Msg::Capture(Capture::Motion { dx: 1, dy: 0 }), Msg::Capture(Capture::Key { hid: 4, down: true })].into();
+        let (m, rest) = merge_motion(Msg::Capture(Capture::Motion { dx: 2, dy: 2 }), take(&mut q));
+        assert!(matches!(m, Msg::Capture(Capture::Motion { dx: 3, dy: 2 })));
+        assert!(matches!(rest, Some(Msg::Capture(Capture::Key { hid: 4, down: true }))));
+    }
+
+    #[test]
+    fn anything_else_passes_untouched_and_an_empty_queue_ends_the_merge() {
+        let mut q = std::collections::VecDeque::new();
+        let (m, rest) = merge_motion(Msg::Kick, take(&mut q));
+        assert!(matches!(m, Msg::Kick) && rest.is_none());
+        let (m, rest) = merge_motion(motion(1, 1, 4, 4), take(&mut q));
+        assert!(matches!(m, Msg::Motion { dx: 4, dy: 4, .. }) && rest.is_none());
     }
 }

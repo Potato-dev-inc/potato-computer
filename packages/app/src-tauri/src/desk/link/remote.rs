@@ -112,7 +112,32 @@ pub trait RemoteHost: Send + Sync {
 
     fn clipboard_read(&self) -> Result<Vec<ClipItem>, String>;
     fn clipboard_write(&self, items: &[ClipItem]) -> Result<(), String>;
+
+    // ---- files dragged across (`files.rs`, `hub/drag.rs`) ----------------------------------------------------
+
+    /// While a button is held near an edge that faces a linked computer: `Some((x, y, width, height))` is a strip
+    /// along that edge (desktop pixels) where a drag of files in progress can be noticed; `None` takes it away.
+    fn drag_strip(&self, _rect: Option<(i32, i32, i32, i32)>) {}
+    /// The files being dragged with the local mouse right now, when this computer can tell.
+    fn dragged_files(&self) -> Option<Vec<std::path::PathBuf>> {
+        None
+    }
+    /// No button is held any more: forget any drag seen, take the strip away.
+    fn drag_reset(&self) {}
+    /// The drag on this computer is over (its files went to the other computer): cancel it here, without a drop.
+    fn cancel_local_drag(&self) {}
+    /// Starts a real drag of `items` under the pointer, for the computer using this one. `done(accepted)` is called
+    /// once, from any thread, when it ends. An error when this computer cannot start one (the files are kept instead).
+    fn begin_file_drag(&self, _items: Vec<std::path::PathBuf>, _done: DragDone) -> Result<(), String> {
+        Err("this computer cannot start a drag of files".into())
+    }
+    /// Ends the drag `begin_file_drag` started: dropped where the pointer is (`drop`) or cancelled.
+    fn end_file_drag(&self, _drop: bool) {}
+    /// Shows `path` in the file manager.
+    fn reveal(&self, _path: &std::path::Path) {}
 }
+
+pub type DragDone = Box<dyn FnOnce(bool) + Send>;
 
 /// Any system without a real implementation yet. Every call says so.
 #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]

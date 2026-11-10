@@ -135,6 +135,9 @@ extern "C" {
     pub fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
     pub fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
     pub fn CGWarpMouseCursorPosition(point: CGPoint) -> CGError;
+    pub fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> CGError;
+    pub fn CGDisplayHideCursor(display: CGDirectDisplayID) -> CGError;
+    pub fn CGDisplayShowCursor(display: CGDirectDisplayID) -> CGError;
     pub fn CGGetActiveDisplayList(max: u32, displays: *mut CGDirectDisplayID, count: *mut u32) -> CGError;
     pub fn CGMainDisplayID() -> CGDirectDisplayID;
     pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;

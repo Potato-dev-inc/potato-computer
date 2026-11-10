@@ -142,3 +142,72 @@ pub fn write(items: &[ClipItem]) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---- the drag pasteboard: what Finder (or any app) is dragging right now -------------------------------------
+
+/// `NSPasteboardNameDrag`.
+const DRAG_PASTEBOARD: &str = "Apple CFPasteboard drag";
+const FILE_URL_TYPE: &str = "public.file-url";
+
+unsafe fn drag_pasteboard() -> Id {
+    send1(class("NSPasteboard"), sel!("pasteboardWithName:"), nsstring(DRAG_PASTEBOARD))
+}
+
+/// Changes every time a drag starts anywhere (the drag pasteboard is written then). Keeps an old drag's files from
+/// being taken for a new one.
+pub fn drag_change_count() -> usize {
+    let _pool = Pool::new();
+    // SAFETY: plain messages to the shared drag pasteboard.
+    unsafe {
+        let pb = drag_pasteboard();
+        if pb.is_null() {
+            return 0;
+        }
+        send0_usize(pb, sel!("changeCount"))
+    }
+}
+
+/// The files on the drag pasteboard.
+pub fn drag_files() -> Vec<std::path::PathBuf> {
+    let _pool = Pool::new();
+    let mut out = Vec::new();
+    // SAFETY: plain messages; every object read here is autoreleased into the pool above.
+    unsafe {
+        let pb = drag_pasteboard();
+        if pb.is_null() {
+            return out;
+        }
+        let items = send0(pb, sel!("pasteboardItems"));
+        if items.is_null() {
+            return out;
+        }
+        let count = send0_usize(items, sel!("count"));
+        let at: unsafe extern "C" fn(Id, Sel, usize) -> Id = std::mem::transmute(ffi::objc_msgSend as unsafe extern "C" fn());
+        for i in 0..count.min(10_000) {
+            let item = at(items, sel!("objectAtIndex:"), i);
+            if item.is_null() {
+                continue;
+            }
+            let s = send1(item, sel!("stringForType:"), nsstring(FILE_URL_TYPE));
+            if s.is_null() {
+                continue;
+            }
+            let url = send1(class("NSURL"), sel!("URLWithString:"), s);
+            if url.is_null() {
+                continue;
+            }
+            // Finder hands file reference URLs (file:///.file/id=...): resolve them to a path URL first.
+            let resolved = send0(url, sel!("filePathURL"));
+            let url = if resolved.is_null() { url } else { resolved };
+            let path = send0(url, sel!("path"));
+            if path.is_null() {
+                continue;
+            }
+            let utf8 = send0_ptr(path, sel!("UTF8String")) as *const c_char;
+            if !utf8.is_null() {
+                out.push(std::path::PathBuf::from(CStr::from_ptr(utf8).to_string_lossy().into_owned()));
+            }
+        }
+    }
+    out
+}

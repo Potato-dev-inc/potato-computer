@@ -6,6 +6,7 @@ mod clipboard;
 mod cursor;
 mod cursor_lock;
 mod display;
+mod drag;
 mod dpi;
 mod hook;
 mod remote;

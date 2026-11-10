@@ -38,6 +38,10 @@ struct Ctx {
     down_at_start: BTreeSet<u16>,
     /// Of those, the ones whose release was swallowed.
     swallowed_ups: Mutex<BTreeSet<u16>>,
+    /// Mouse buttons down when the pointer left (a drag of files crosses with one held), and which of their
+    /// releases were swallowed here.
+    buttons_at_start: [bool; 3],
+    swallowed_button_ups: Mutex<BTreeSet<u8>>,
     tap: AtomicUsize,
     stop: AtomicBool,
 }
@@ -69,13 +73,19 @@ pub fn start(sink: CaptureSink) -> Result<CaptureHook, String> {
         pid: i64::from(unsafe { ffi::getpid() }),
         down_at_start,
         swallowed_ups: Mutex::new(BTreeSet::new()),
+        // SAFETY: plain calls.
+        buttons_at_start: [0u32, 1, 2].map(|b| unsafe { ffi::CGEventSourceButtonState(ffi::CG_EVENT_SOURCE_STATE_COMBINED_SESSION, b) }),
+        swallowed_button_ups: Mutex::new(BTreeSet::new()),
         tap: AtomicUsize::new(0),
         stop: AtomicBool::new(false),
     });
     ACTIVE.store(Some(ctx.clone()));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
     let ctx_thread = ctx.clone();
-    let spawned = thread::Builder::new().name("desk-capture".into()).spawn(move || run_tap(&ctx_thread, &ready_tx));
+    let spawned = thread::Builder::new().name("desk-capture".into()).spawn(move || {
+        crate::desk::os::boost_thread();
+        run_tap(&ctx_thread, &ready_tx)
+    });
     let join = match spawned {
         Ok(j) => j,
         Err(e) => {
@@ -129,13 +139,15 @@ fn run_tap(ctx: &Ctx, ready: &mpsc::Sender<Result<(), String>>) {
 }
 
 impl CaptureHook {
-    /// Ends the tap and waits for the thread. Returns the Mac key codes that were down when the pointer left and
-    /// were let go meanwhile: their release never reached this computer and must be sent now.
-    pub fn stop(self) -> Vec<u16> {
+    /// Ends the tap and waits for the thread. Returns the Mac key codes, then the mouse buttons, that were down when
+    /// the pointer left and were let go meanwhile: their release never reached this computer and must be sent now.
+    pub fn stop(self) -> (Vec<u16>, Vec<u8>) {
         ACTIVE.store(None);
         self.ctx.stop.store(true, Ordering::SeqCst);
         let _ = self.join.join();
-        self.ctx.swallowed_ups.lock().map(|s| s.iter().copied().collect()).unwrap_or_default()
+        let keys = self.ctx.swallowed_ups.lock().map(|s| s.iter().copied().collect()).unwrap_or_default();
+        let buttons = self.ctx.swallowed_button_ups.lock().map(|s| s.iter().copied().collect()).unwrap_or_default();
+        (keys, buttons)
     }
 }
 
@@ -203,6 +215,13 @@ unsafe extern "C" fn tap_proc(_proxy: CGEventTapProxy, kind: u32, event: CGEvent
         }
         _ => None,
     };
+    if let Some(Capture::Button { button, down: false }) = reported {
+        if ctx.buttons_at_start.get(usize::from(button)).copied().unwrap_or(false) {
+            if let Ok(mut s) = ctx.swallowed_button_ups.try_lock() {
+                s.insert(button);
+            }
+        }
+    }
     if let Some(e) = reported {
         (ctx.sink)(e);
     }

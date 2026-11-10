@@ -184,14 +184,42 @@ fn refuse(link: &Arc<dyn Link>, log: &RefusalLog, capability: Option<&Arc<Capabi
     l.push(Refusal { peer: link.peer(), capability: capability.map(|c| c.id.clone()), kind });
 }
 
-/// Closes a direct-only link the moment its path turns into a relay.
+/// How long a new direct-only link may take to find its direct path. iroh usually starts a connection on the relay
+/// and moves it onto a direct path once hole punching succeeds (100 ms to a couple of seconds). Refusing on the first
+/// look made linking fail, or take many redials, on most networks.
+pub const DIRECT_WAIT: Duration = Duration::from_secs(5);
+/// A direct-only link whose path stays off direct this long is closed. A path that flips for a moment (Wi-Fi power
+/// save, NAT rebinding, iroh re-probing, or no path selected while it migrates) used to end the link at once, which
+/// sent the pointer home and dropped the session in the middle of use.
+pub const RELAY_GRACE: Duration = Duration::from_millis(2_000);
+const PATH_LOOK: Duration = Duration::from_millis(100);
+
+/// Waits until `link` runs on a direct path, at most `limit`. True when it does.
+pub async fn wait_direct(link: &Arc<dyn Link>, limit: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if link.path() == PathKind::Direct {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(PATH_LOOK).await;
+    }
+}
+
+/// Closes a direct-only link once its path has been off direct for `RELAY_GRACE` in a row.
 pub fn spawn_path_guard(link: Arc<dyn Link>) {
     tokio::spawn(async move {
         let mut now = link.path();
         loop {
-            if now == PathKind::Relayed {
-                link.close(CLOSE_RELAY, "refused");
-                return;
+            if now != PathKind::Direct {
+                if !wait_direct(&link, RELAY_GRACE).await {
+                    tracing::info!("p2p: a direct-only link stayed off its direct path, closing it");
+                    link.close(CLOSE_RELAY, "refused");
+                    return;
+                }
+                now = PathKind::Direct;
             }
             match link.wait_path_change(now).await {
                 Some(next) => now = next,
@@ -222,10 +250,11 @@ pub fn admit(link: &Arc<dyn Link>, registry: &Registry, perms: &dyn Permissions,
     Some(cap)
 }
 
-/// Dial-side rule: a direct-only capability never keeps a relayed link.
-pub fn check_dialed(link: &Arc<dyn Link>, cap: &Capability) -> Result<(), P2pError> {
+/// Dial-side rule: a direct-only capability never keeps a relayed link. It gets `DIRECT_WAIT` to find its direct
+/// path first.
+pub async fn check_dialed(link: &Arc<dyn Link>, cap: &Capability) -> Result<(), P2pError> {
     if !cap.relay_allowed() {
-        if link.path() != PathKind::Direct {
+        if !wait_direct(link, DIRECT_WAIT).await {
             link.close(CLOSE_RELAY, "refused");
             return Err(P2pError::RelayForbidden);
         }
@@ -249,6 +278,12 @@ pub async fn accept_loop(
         }
         let (registry, perms, log) = (registry.clone(), perms.clone(), log.clone());
         tokio::spawn(async move {
+            // A direct-only capability gets a moment to leave the relay before `admit` judges the path.
+            if let Some(cap) = registry.by_alpn(&link.alpn()) {
+                if !cap.relay_allowed() {
+                    wait_direct(&link, DIRECT_WAIT).await;
+                }
+            }
             if let Some(cap) = admit(&link, &registry, perms.as_ref(), &log) {
                 cap.handler.serve(link.peer(), link).await;
             }

@@ -24,7 +24,7 @@ use crate::p2p::endpoint::{BiStream, Link, NodeId, HANDSHAKE_TIMEOUT};
 use crate::p2p::session::{Silence, SilenceVerdict, HEARTBEAT_MS};
 
 use super::hub::{InstallReq, Msg};
-use super::wire::{read_frame, read_kind, write_frame, write_kind, CONTROL_FRAME_MAX, KIND_CONTROL};
+use super::wire::{read_frame, read_kind, write_frame, write_kind, CONTROL_FRAME_MAX, KIND_CONTROL, KIND_TRANSFER};
 use super::{Inner, CLOSE_DEAD, CLOSE_DUPLICATE, CLOSE_PROTOCOL, CLOSE_STOPPED};
 
 /// How often silence and the switch are looked at.
@@ -150,7 +150,7 @@ pub(super) async fn run_tasks(
         tokio::spawn(datagram_writer(link.clone(), dg_rx)),
         tokio::spawn(control_reader(inner.clone(), recv, link.clone(), peer, link_id, shared.clone())),
         tokio::spawn(datagram_reader(inner.clone(), link.clone(), peer, link_id, shared.clone())),
-        tokio::spawn(extra_streams(link.clone())),
+        tokio::spawn(extra_streams(inner.clone(), link.clone(), peer, link_id)),
     ];
 
     watch(&inner, &hub, &link, peer, link_id, &shared).await;
@@ -298,8 +298,42 @@ async fn datagram_reader(inner: Arc<Inner>, link: Arc<dyn Link>, peer: NodeId, l
 
 /// Any other stream on the input link is not ours to parse: it is dropped (DevHop handed every stream to the file
 /// receiver). The control stream keeps working.
-async fn extra_streams(link: Arc<dyn Link>) {
+async fn extra_streams(inner: Arc<Inner>, link: Arc<dyn Link>, peer: NodeId, link_id: u64) {
     while let Ok(stream) = link.accept_bi().await {
-        drop(stream);
+        let inner = inner.clone();
+        tokio::spawn(async move { incoming_stream(inner, stream, peer, link_id).await });
     }
+}
+
+/// A stream the other computer opened after the control stream: files dragged across, or nothing this side knows.
+async fn incoming_stream(inner: Arc<Inner>, stream: BiStream, peer: NodeId, link_id: u64) {
+    let BiStream { send, mut recv } = stream;
+    if read_kind(&mut recv).await.ok() != Some(KIND_TRANSFER) {
+        return;
+    }
+    let Some(hub) = inner.hub_tx() else { return };
+    let manifest = match timeout(Duration::from_secs(10), super::files::read_manifest(&mut recv)).await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            tracing::warn!(error = e.as_str(), "desk: refused dragged files");
+            return;
+        }
+        Err(_) => return,
+    };
+    // Only the drag the computer using this one announced; anything else is dropped unread.
+    if !inner.drop_expected(&peer, manifest.token) {
+        tracing::warn!("desk: refused dragged files nobody announced");
+        return;
+    }
+    let token = manifest.token;
+    tracing::info!(token, files = manifest.entries.len(), bytes = manifest.total(), "desk: receiving dragged files");
+    tokio::task::spawn_blocking(super::files::sweep_staging);
+    let stage = super::files::new_stage(token);
+    let result = super::files::receive(&mut recv, &manifest, &stage).await;
+    drop(send);
+    match &result {
+        Ok(_) => tracing::info!(token, "desk: dragged files are here"),
+        Err(e) => tracing::warn!(token, error = e.as_str(), "desk: dragged files did not arrive"),
+    }
+    let _ = hub.send(Msg::DropReceived { peer, link_id, token, result });
 }

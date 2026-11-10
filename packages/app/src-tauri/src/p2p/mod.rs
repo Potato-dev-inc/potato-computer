@@ -193,7 +193,7 @@ impl P2p {
         let transport = self.want(capability).await?;
         let cap = self.registry.get(capability).ok_or_else(|| P2pError::UnknownCapability(capability.to_string()))?;
         let link = transport.dial(peer, &cap.alpn).await?;
-        check_dialed(&link, &cap)?;
+        check_dialed(&link, &cap).await?;
         Ok(link)
     }
 

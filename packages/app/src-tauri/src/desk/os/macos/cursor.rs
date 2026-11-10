@@ -2,6 +2,7 @@
 //! Cursor position and move, in points (the space macOS uses for the cursor and the screens).
 
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -51,10 +52,53 @@ pub fn warp(x: i32, y: i32) -> Result<(), String> {
     };
     // SAFETY: plain call.
     let err = unsafe { ffi::CGWarpMouseCursorPosition(point) };
-    if err == ffi::CG_SUCCESS {
-        Ok(())
-    } else {
-        Err(format!("CGWarpMouseCursorPosition failed ({err})"))
+    if err != ffi::CG_SUCCESS {
+        return Err(format!("CGWarpMouseCursorPosition failed ({err})"));
+    }
+    // A warp makes macOS ignore the Mac's own mouse for about 250 ms (the "suppression interval"): the pointer
+    // feels stuck after every return home and while this Mac is being controlled. Re-associating right after the
+    // warp cancels that (what Barrier and Synergy do). Not while parked: there the mouse must stay dissociated.
+    if !PARKED.load(Ordering::SeqCst) {
+        // SAFETY: plain call.
+        unsafe { ffi::CGAssociateMouseAndMouseCursorPosition(true) };
+    }
+    Ok(())
+}
+
+/// The pointer is parked for another computer: the Mac's mouse is dissociated from the cursor and the cursor hidden.
+static PARKED: AtomicBool = AtomicBool::new(false);
+/// This app hid the cursor (CGDisplayHideCursor counts, so it is shown exactly once).
+static HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// Holds the Mac's cursor still at `park` and hides it, while its mouse drives another computer (DevHop's
+/// `set_remote(true)`). Without this the swallowed moves still slid the Mac's cursor around under the other
+/// computer's pointer, into hot corners and the Dock.
+pub fn park(at: (i32, i32)) {
+    // SAFETY: plain call.
+    unsafe {
+        // Reset a dissociation left over from before, then dissociate.
+        ffi::CGAssociateMouseAndMouseCursorPosition(true);
+    }
+    PARKED.store(true, Ordering::SeqCst);
+    let _ = warp(at.0, at.1);
+    // SAFETY: plain calls.
+    unsafe {
+        ffi::CGAssociateMouseAndMouseCursorPosition(false);
+        if !HIDDEN.swap(true, Ordering::SeqCst) {
+            ffi::CGDisplayHideCursor(ffi::CGMainDisplayID());
+        }
+    }
+}
+
+/// Undoes `park`. Safe to call any number of times.
+pub fn unpark() {
+    PARKED.store(false, Ordering::SeqCst);
+    // SAFETY: plain calls.
+    unsafe {
+        ffi::CGAssociateMouseAndMouseCursorPosition(true);
+        if HIDDEN.swap(false, Ordering::SeqCst) {
+            ffi::CGDisplayShowCursor(ffi::CGMainDisplayID());
+        }
     }
 }
 

@@ -60,8 +60,8 @@ pub(super) fn spawn_send(inner: &Arc<Inner>, peer: NodeId) {
     if !inner.clipboard_allowed(&peer) {
         return;
     }
-    let inner = inner.clone();
-    tokio::spawn(async move { send_current(inner, peer).await });
+    let task_inner = inner.clone();
+    inner.spawn(async move { send_current(task_inner, peer).await });
 }
 
 /// What the copy looks like to the person, if it could not be sent.

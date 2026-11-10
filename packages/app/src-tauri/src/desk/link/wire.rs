@@ -12,6 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub const KIND_CONTROL: u8 = 1;
 /// A clipboard stream on the clipboard link.
 pub const KIND_CLIPBOARD: u8 = 2;
+/// Files dragged across (`files.rs`).
+pub const KIND_TRANSFER: u8 = 3;
 
 /// Control frames are tiny. (DevHop's limit was the clipboard's: 32 MiB.)
 pub const CONTROL_FRAME_MAX: usize = 16 * 1024;
