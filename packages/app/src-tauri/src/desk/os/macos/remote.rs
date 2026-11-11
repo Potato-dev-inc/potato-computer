@@ -89,8 +89,7 @@ impl Default for MacosRemote {
 }
 
 fn require_access() -> Result<(), String> {
-    // SAFETY: plain call.
-    if unsafe { ffi::AXIsProcessTrusted() } {
+    if ffi::ask_for_accessibility() {
         Ok(())
     } else {
         Err(ACCESS_NEEDED.into())

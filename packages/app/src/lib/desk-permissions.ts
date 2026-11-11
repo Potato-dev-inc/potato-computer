@@ -20,9 +20,9 @@ function isPermissions(v: unknown): v is DeskPermissions {
 export function accessibilityHelp(p: DeskPermissions | null): { title: string; steps: string } | null {
   if (!p || p.accessibility !== false) return null;
   return {
-    title: 'This Mac has not allowed Puppet Master to control the mouse and keyboard yet.',
+    title: 'This Mac has not allowed My Computer to control the mouse and keyboard yet.',
     steps:
-      'Open System Settings, go to Privacy & Security, then Accessibility, and switch on Puppet Master. If it is not in the list, add it with the + button. If you started Puppet Master from a terminal (npm run tauri dev), switch on that terminal app instead and start it again. Then come back here.',
+      'Open System Settings, go to Privacy & Security, then Accessibility, and switch on My Computer. If it is not in the list, add it with the + button. If it is listed and already on but this still shows, remove it with the minus button and add it again (after an update macOS can keep the permission of the old version). If you started it from a terminal (npm run tauri dev), switch on that terminal app instead and start it again. Then come back here.',
   };
 }
 

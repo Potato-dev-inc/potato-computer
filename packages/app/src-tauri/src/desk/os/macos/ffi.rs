@@ -102,6 +102,10 @@ pub const MOVE_EVENTS_MASK: u64 = (1 << CG_EVENT_MOUSE_MOVED)
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     pub fn AXIsProcessTrusted() -> bool;
+    /// With `{kAXTrustedCheckOptionPrompt: true}` macOS also shows its own "allow" dialog and adds this app to the
+    /// Accessibility list (switched off), so the person only has to switch it on.
+    pub fn AXIsProcessTrustedWithOptions(options: CFTypeRef) -> bool;
+    pub static kAXTrustedCheckOptionPrompt: CFStringRef;
     pub fn CGEventTapCreate(
         tap: u32,
         place: u32,
@@ -161,6 +165,17 @@ extern "C" {
     /// Runs the loop for at most `seconds`, then returns.
     pub fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source_handled: u8) -> i32;
     pub fn CFRelease(cf: CFTypeRef);
+    pub static kCFBooleanTrue: CFTypeRef;
+    pub static kCFTypeDictionaryKeyCallBacks: c_void;
+    pub static kCFTypeDictionaryValueCallBacks: c_void;
+    pub fn CFDictionaryCreate(
+        allocator: *const c_void,
+        keys: *const *const c_void,
+        values: *const *const c_void,
+        count: isize,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> CFTypeRef;
 }
 
 extern "C" {
@@ -179,3 +194,35 @@ extern "C" {
 #[link(name = "Foundation", kind = "framework")]
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {}
+
+/// Asks macOS, once per run, to show its Accessibility dialog for this app (and put it in the list). Returns whether
+/// access is on now.
+pub fn ask_for_accessibility() -> bool {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    // SAFETY: plain call.
+    if unsafe { AXIsProcessTrusted() } {
+        return true;
+    }
+    if ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    // SAFETY: a one-entry CF dictionary built from the system's own constants, released after the call.
+    unsafe {
+        let keys = [kAXTrustedCheckOptionPrompt as *const c_void];
+        let values = [kCFBooleanTrue as *const c_void];
+        let options = CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            &kCFTypeDictionaryKeyCallBacks as *const c_void,
+            &kCFTypeDictionaryValueCallBacks as *const c_void,
+        );
+        if options.is_null() {
+            return false;
+        }
+        let trusted = AXIsProcessTrustedWithOptions(options);
+        CFRelease(options);
+        trusted
+    }
+}

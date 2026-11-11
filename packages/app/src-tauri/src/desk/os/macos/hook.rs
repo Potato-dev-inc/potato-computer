@@ -19,7 +19,7 @@ use super::ffi::{self, CFMachPortRef, CFTypeRef, CGEventRef, CGEventTapProxy};
 use crate::desk::engine::hotkeys::{HotkeyMatcher, Table, Verdict};
 use crate::desk::host::{hook_looks_dropped, HookHealth, HostEvent, HostSink, DROPPED_AFTER_MS};
 
-const ACCESS_NEEDED: &str = "Puppet Master needs Accessibility access to read keys. Turn it on in System Settings > Privacy & Security > Accessibility, then restart Puppet Master.";
+const ACCESS_NEEDED: &str = "My Computer needs Accessibility access to read keys. Switch it on in System Settings > Privacy & Security > Accessibility (if My Computer is listed but already on, remove it with the minus button and add it again). Keys start working within a few seconds.";
 const TAP_REFUSED: &str =
     "macOS would not start the keyboard hook. Check Accessibility access in System Settings > Privacy & Security.";
 
@@ -83,8 +83,7 @@ fn normal_key_held() -> bool {
 }
 
 pub fn install(table: Table, sink: HostSink) -> Result<Hook, String> {
-    // SAFETY: plain call.
-    if !unsafe { ffi::AXIsProcessTrusted() } {
+    if !ffi::ask_for_accessibility() {
         return Err(ACCESS_NEEDED.into());
     }
     if ACTIVE.load().is_some() {

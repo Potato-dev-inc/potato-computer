@@ -28,8 +28,8 @@ const MAX_STEP: i64 = 2000;
 /// Wheel units the other side uses (a Windows notch is 120) per scrolled pixel here. `remote.rs` divides by it.
 pub(super) const WHEEL_UNITS_PER_PIXEL: i32 = 4;
 
-pub(super) const ACCESS_NEEDED: &str = "Puppet Master needs Accessibility access to control this Mac. Turn it on in System Settings > Privacy & Security > Accessibility, then restart Puppet Master. Started from a terminal (npm run tauri dev)? Turn it on for that terminal app instead.";
-const TAP_REFUSED: &str = "macOS would not let Puppet Master take the mouse and keyboard. Check Accessibility access in System Settings > Privacy & Security.";
+pub(super) const ACCESS_NEEDED: &str = "My Computer needs Accessibility access to control this Mac. Switch it on in System Settings > Privacy & Security > Accessibility (if My Computer is listed but already on, remove it with the minus button and add it again). Started from a terminal (npm run tauri dev)? Switch it on for that terminal app instead.";
+const TAP_REFUSED: &str = "macOS would not let My Computer take the mouse and keyboard. Check Accessibility access in System Settings > Privacy & Security.";
 
 struct Ctx {
     sink: CaptureSink,
@@ -59,8 +59,7 @@ fn key_down(code: u16) -> bool {
 }
 
 pub fn start(sink: CaptureSink) -> Result<CaptureHook, String> {
-    // SAFETY: plain call.
-    if !unsafe { ffi::AXIsProcessTrusted() } {
+    if !ffi::ask_for_accessibility() {
         return Err(ACCESS_NEEDED.into());
     }
     if ACTIVE.load().is_some() {

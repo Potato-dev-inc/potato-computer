@@ -40,8 +40,7 @@ pub struct PointerWatch {
 
 /// Starts the tap. Returns once the tap is on (or has failed), so an error means nothing is watched.
 pub fn start(sink: PointerSink) -> Result<PointerWatch, String> {
-    // SAFETY: plain call.
-    if !unsafe { ffi::AXIsProcessTrusted() } {
+    if !ffi::ask_for_accessibility() {
         return Err(ACCESS_NEEDED.into());
     }
     if ACTIVE.load().is_some() {
