@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-const APP_ID: &str = "com.puppetmaster.app";
+const APP_ID: &str = "com.potatodev.computer";
 pub const PROFILE_ENV: &str = "PUPPET_MASTER_PROFILE";
 
 pub fn profile_from(raw: Option<&str>) -> Option<String> {

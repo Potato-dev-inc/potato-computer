@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 #[cfg(test)]
 use std::collections::HashMap;
 
-pub const SERVICE: &str = "com.puppetmaster.app";
+pub const SERVICE: &str = "com.potatodev.computer";
 
 pub trait SecretBackend: Send + Sync {
     fn get(&self, name: &str) -> Result<Option<String>, String>;
